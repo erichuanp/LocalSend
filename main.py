@@ -1,4 +1,4 @@
-# 创建一个完整的文件传输服务
+# 创建一个完整的文件传输服务，自动选择可用端口
 import os
 import socket
 import threading
@@ -18,6 +18,8 @@ def get_desktop_path():
     desktop_paths = [
         home / "Desktop",
         home / "桌面", 
+        home / "Bureau",  # French
+        home / "Escritorio",  # Spanish
     ]
     
     for path in desktop_paths:
@@ -48,10 +50,32 @@ def get_device_name():
     except:
         return "Unknown Device"
 
+# 检查端口是否可用
+def is_port_available(port):
+    """检查指定端口是否可用"""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(('', port))
+            return True
+    except OSError:
+        return False
+
+# 找到可用端口
+def find_available_port(start_port=8888, max_attempts=100):
+    """找到可用的端口"""
+    for port in range(start_port, start_port + max_attempts):
+        if is_port_available(port):
+            return port
+    return None
+
 # 全局变量存储传输历史
 transfer_history = []
 
 class FileTransferHandler(BaseHTTPRequestHandler):
+    def log_message(self, format, *args):
+        """重写日志方法，减少控制台输出"""
+        pass
+    
     def do_GET(self):
         """处理GET请求"""
         if self.path == '/':
@@ -199,6 +223,12 @@ class FileTransferHandler(BaseHTTPRequestHandler):
             color: #721c24;
             border: 1px solid #f5c6cb;
         }}
+        
+        .status.info {{
+            background: #d1ecf1;
+            color: #0c5460;
+            border: 1px solid #bee5eb;
+        }}
     </style>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
 </head>
@@ -215,10 +245,8 @@ class FileTransferHandler(BaseHTTPRequestHandler):
         
         <div class="drop-zone" id="dropZone">
             <i class="fas fa-cloud-upload-alt"></i>
-            <h3>拖拽文件或文件夹到这里</h3>
-            <p>支持多文件同时传输，文件将自动保存到对方桌面</p>
-            <input type="file" id="fileInput" multiple style="display: none;" webkitdirectory>
-            <input type="file" id="fileInputSingle" multiple style="display: none;">
+            <h3>拖拽文件到这里上传</h3>
+            <p>支持多文件同时传输，文件将自动保存到服务器桌面</p>
         </div>
         
         <div class="progress-bar" id="progressBar">
@@ -237,8 +265,6 @@ class FileTransferHandler(BaseHTTPRequestHandler):
 
     <script>
         const dropZone = document.getElementById('dropZone');
-        const fileInput = document.getElementById('fileInput');
-        const fileInputSingle = document.getElementById('fileInputSingle');
         const progressBar = document.getElementById('progressBar');
         const progressFill = document.getElementById('progressFill');
         const status = document.getElementById('status');
@@ -274,13 +300,6 @@ class FileTransferHandler(BaseHTTPRequestHandler):
 
         // 处理文件拖拽
         dropZone.addEventListener('drop', handleDrop, false);
-        dropZone.addEventListener('click', () => {{
-            fileInputSingle.click();
-        }});
-
-        fileInputSingle.addEventListener('change', (e) => {{
-            handleFiles(e.target.files);
-        }});
 
         function handleDrop(e) {{
             const dt = e.dataTransfer;
@@ -347,6 +366,7 @@ class FileTransferHandler(BaseHTTPRequestHandler):
                         historyList.innerHTML = data.map(item => 
                             `<div class="history-item">
                                 <strong>${{item.filename}}</strong> 
+                                <span style="color: #666;">(来自: ${{item.from_ip}})</span>
                                 <span style="color: #666; float: right;">${{item.timestamp}}</span>
                             </div>`
                         ).join('');
@@ -387,81 +407,73 @@ class FileTransferHandler(BaseHTTPRequestHandler):
                     self.end_headers()
                     return
 
-                # 创建临时目录
-                temp_dir = tempfile.mkdtemp()
-                
-                try:
-                    # 解析上传的文件
-                    form = cgi.FieldStorage(
-                        fp=self.rfile,
-                        headers=self.headers,
-                        environ={
-                            'REQUEST_METHOD': 'POST',
-                            'CONTENT_TYPE': content_type,
-                        }
-                    )
-
-                    desktop_path = get_desktop_path()
-                    client_ip = self.client_address[0]
-                    
-                    uploaded_files = []
-                    
-                    if 'files' in form:
-                        files = form['files']
-                        if not isinstance(files, list):
-                            files = [files]
-                        
-                        for file_item in files:
-                            if file_item.filename:
-                                # 安全的文件名处理
-                                safe_filename = os.path.basename(file_item.filename)
-                                if not safe_filename:
-                                    continue
-                                
-                                # 目标文件路径
-                                target_path = os.path.join(desktop_path, safe_filename)
-                                
-                                # 如果文件已存在，添加数字后缀
-                                counter = 1
-                                original_target = target_path
-                                while os.path.exists(target_path):
-                                    name, ext = os.path.splitext(original_target)
-                                    target_path = f"{name}({counter}){ext}"
-                                    counter += 1
-                                
-                                # 保存文件
-                                with open(target_path, 'wb') as f:
-                                    f.write(file_item.file.read())
-                                
-                                uploaded_files.append(safe_filename)
-                                
-                                # 添加到传输历史
-                                transfer_history.append({
-                                    'filename': safe_filename,
-                                    'timestamp': time.strftime('%Y-%m-%d %H:%M:%S'),
-                                    'from_ip': client_ip,
-                                    'size': os.path.getsize(target_path)
-                                })
-                    
-                    # 保持历史记录在合理数量内
-                    if len(transfer_history) > 50:
-                        transfer_history[:] = transfer_history[-50:]
-                    
-                    self.send_response(200)
-                    self.send_header('Content-type', 'application/json; charset=utf-8')
-                    self.end_headers()
-                    
-                    response = {
-                        'status': 'success',
-                        'message': f'成功上传 {len(uploaded_files)} 个文件',
-                        'files': uploaded_files
+                # 解析上传的文件
+                form = cgi.FieldStorage(
+                    fp=self.rfile,
+                    headers=self.headers,
+                    environ={
+                        'REQUEST_METHOD': 'POST',
+                        'CONTENT_TYPE': content_type,
                     }
-                    self.wfile.write(json.dumps(response, ensure_ascii=False).encode('utf-8'))
+                )
+
+                desktop_path = get_desktop_path()
+                client_ip = self.client_address[0]
+                
+                uploaded_files = []
+                
+                if 'files' in form:
+                    files = form['files']
+                    if not isinstance(files, list):
+                        files = [files]
                     
-                finally:
-                    # 清理临时目录
-                    shutil.rmtree(temp_dir, ignore_errors=True)
-                    
+                    for file_item in files:
+                        if file_item.filename:
+                            # 安全的文件名处理
+                            safe_filename = os.path.basename(file_item.filename)
+                            if not safe_filename:
+                                continue
+                            
+                            # 目标文件路径
+                            target_path = os.path.join(desktop_path, safe_filename)
+                            
+                            # 如果文件已存在，添加数字后缀
+                            counter = 1
+                            original_target = target_path
+                            while os.path.exists(target_path):
+                                name, ext = os.path.splitext(original_target)
+                                target_path = f"{name}({counter}){ext}"
+                                counter += 1
+                            
+                            # 保存文件
+                            with open(target_path, 'wb') as f:
+                                f.write(file_item.file.read())
+                            
+                            uploaded_files.append(safe_filename)
+                            
+                            # 添加到传输历史
+                            transfer_history.append({
+                                'filename': safe_filename,
+                                'timestamp': time.strftime('%Y-%m-%d %H:%M:%S'),
+                                'from_ip': client_ip,
+                                'size': os.path.getsize(target_path)
+                            })
+                
+                # 保持历史记录在合理数量内
+                if len(transfer_history) > 50:
+                    transfer_history[:] = transfer_history[-50:]
+                
+                self.send_response(200)
+                self.send_header('Content-type', 'application/json; charset=utf-8')
+                self.end_headers()
+                
+                response = {
+                    'status': 'success',
+                    'message': f'成功上传 {len(uploaded_files)} 个文件',
+                    'files': uploaded_files
+                }
+                self.wfile.write(json.dumps(response, ensure_ascii=False).encode('utf-8'))
+                
             except Exception as e:
                 print(f"上传错误: {e}")
                 self.send_response(500)
@@ -474,8 +486,14 @@ class FileTransferHandler(BaseHTTPRequestHandler):
                 }
                 self.wfile.write(json.dumps(response, ensure_ascii=False).encode('utf-8'))
 
-def start_server(port=8888):
+def start_server(preferred_port=8888):
     """启动文件传输服务器"""
+    # 查找可用端口
+    port = find_available_port(preferred_port)
+    if port is None:
+        print("❌ 无法找到可用端口，请检查网络设置")
+        return
+    
     server_address = ('', port)
     httpd = HTTPServer(server_address, FileTransferHandler)
     
@@ -492,7 +510,7 @@ def start_server(port=8888):
     print("=" * 60)
     print("📋 使用说明:")
     print("1. 在其他设备的浏览器中打开上述地址")
-    print("2. 将文件或文件夹拖拽到网页中的上传区域")
+    print("2. 将文件拖拽到网页中的上传区域")
     print("3. 文件将自动保存到本机桌面")
     print("4. 按 Ctrl+C 停止服务")
     print("=" * 60)
@@ -503,7 +521,5 @@ def start_server(port=8888):
         print("\n\n🛑 服务已停止")
         httpd.server_close()
 
-if __name__ == "__main__":
-    # 可以修改端口号
-    PORT = 8888
-    start_server(PORT)
+# 启动服务
+start_server()
